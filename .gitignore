@@ -1,0 +1,9 @@
+credentials.json
+checkpoint_state.json
+auto_copy.log.2026-07-09
+checkpoint_state.json.tmp
+checkpoint_state_web.json.tmp
+auto_copy.log
+auto_copy_web.log
+__pycache__/
+*.pyc
