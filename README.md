@@ -1,2 +1,2 @@
-Create credentils.json
+Create credentials.json
 and run
