@@ -13,7 +13,7 @@ REM  Cara pake: double-click file ini (atau jalanin dari terminal),
 REM  BUKAN "python auto_copy_tele_v3.py" langsung.
 REM ============================================================
 
-set SCRIPT_NAME=auto.py
+set SCRIPT_NAME=autoTele.py
 set RESTART_COUNT=0
 set MAX_RESTART_PER_HOUR=10
 

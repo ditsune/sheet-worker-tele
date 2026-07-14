@@ -14,6 +14,7 @@ import time
 import json
 import logging
 import os
+import sys
 from datetime import datetime, date
 from logging.handlers import TimedRotatingFileHandler
 
@@ -32,20 +33,34 @@ CREDENTIALS_FILE = 'credentials.json'
 # sama SHIFT_DATE/SHIFT di bawah -- source ngikutin tanggal kalender,
 # shift ngikutin jadwal kerja. Keduanya bisa beda tanggal pas shift
 # malam lewat tengah malam (source ganti, tapi target/shift tetap).
-SOURCE_TAB_NAME = '2026-07-10'
+SOURCE_TAB_NAME = '2026-07-14'
 
 # --- Ganti CUMA pas GANTI SHIFT (bukan pas ganti tanggal source) ---
-# (v5) TARGET_TAB_NAME dan DUPLICATE_CHECK_EXTRA_TABS sekarang di-derive
-# otomatis dari 2 variabel ini, jadi cukup ubah SHIFT_DATE + SHIFT tiap
-# mulai shift baru:
+# (v5) TARGET_TAB_NAME sekarang di-derive otomatis dari 2 variabel ini,
+# jadi cukup ubah SHIFT_DATE + SHIFT tiap mulai shift baru:
 #   - SHIFT_DATE : tanggal shift ini (format sama kayak nama tab, misal '9 juli')
 #   - SHIFT      : 'pagi' atau 'malam'
 # Contoh: mulai shift malam tgl 9 juli -> SHIFT_DATE='9 juli', SHIFT='malam'
 #         -> TARGET_TAB_NAME jadi '9 juli malam'
-#         -> DUPLICATE_CHECK_EXTRA_TABS jadi ['9 juli pagi'] (shift pasangannya,
-#            buat nyegah dobel-copy ID yang udah dipindah shift pagi)
-SHIFT_DATE = '10 juli'
-SHIFT = 'malam'  # 'pagi' atau 'malam'
+SHIFT_DATE = '14 juli'
+SHIFT = 'pagi'  # 'pagi' atau 'malam'
+
+# --- (fix v6) Nama tab SHIFT SEBELUMNYA, buat cross-check dedup ---
+# PENTING: ini BUKAN sekadar "shift pasangan di tanggal yang sama".
+# Shift malam nyambung lewat tengah malam, jadi shift yang beneran
+# terjadi PERSIS SEBELUM shift PAGI hari ini adalah shift MALAM di
+# TANGGAL KEMARIN (beda tanggal!) -- bukan "malam" di tanggal yang
+# sama kayak yang di-derive otomatis di versi sebelumnya (v5), yang
+# jadi penyebab data lama gak ke-dedup dan ke-copy dobel.
+#
+# Contoh: mulai shift PAGI tgl 14 juli -> shift sebelumnya yang beneran
+# kejadian itu "13 juli malam", BUKAN "14 juli malam" (yang malah belum
+# terjadi / tab-nya belum ada). Makanya WAJIB diisi manual persis nama
+# tab-nya tiap ganti shift, gak bisa di-derive otomatis dari SHIFT_DATE.
+#
+# Isi None kalau ini run pertama / gak ada shift sebelumnya yang perlu
+# di-cross-check (misal abis SINGLE_SHIFT_DAY, atau start baru total).
+PREVIOUS_SHIFT_TAB_NAME = '13 juli malam'
 
 # --- Hari-hari khusus (tanggal X9 & X0 tiap siklus 10-hari) ---
 # Di hari-hari ini cuma ADA 1 SHIFT yang kerja (yang satunya libur),
@@ -62,7 +77,7 @@ SHIFT = 'malam'  # 'pagi' atau 'malam'
 # lo shift pagi, berarti HARI ITU LO LIBUR, bukan SINGLE_SHIFT_DAY.
 # SINGLE_SHIFT_DAY = True itu kebalikannya: lo yang KERJA SENDIRIAN
 # karena shift LAWAN yang libur.
-SINGLE_SHIFT_DAY = True
+SINGLE_SHIFT_DAY = False  # True kalau shift lawan libur, target tab cuma 1 (tanpa suffix)
 
 _OTHER_SHIFT = {'pagi': 'malam', 'malam': 'pagi'}
 if SHIFT not in _OTHER_SHIFT:
@@ -70,15 +85,18 @@ if SHIFT not in _OTHER_SHIFT:
 
 if SINGLE_SHIFT_DAY:
     TARGET_TAB_NAME = SHIFT_DATE  # tanpa suffix, misal "10 juli"
-    DUPLICATE_CHECK_EXTRA_TABS = []  # gak ada tab lawan, shift lawan libur
 else:
     TARGET_TAB_NAME = f'{SHIFT_DATE} {SHIFT}'
-    DUPLICATE_CHECK_EXTRA_TABS = [f'{SHIFT_DATE} {_OTHER_SHIFT[SHIFT]}']
+
+# (fix v6) DUPLICATE_CHECK_EXTRA_TABS sekarang cuma dari
+# PREVIOUS_SHIFT_TAB_NAME yang diisi manual (lihat penjelasan di atas),
+# BUKAN di-derive otomatis dari SHIFT_DATE yang sama.
+DUPLICATE_CHECK_EXTRA_TABS = [PREVIOUS_SHIFT_TAB_NAME] if PREVIOUS_SHIFT_TAB_NAME else []
 
 STATE_FILE = 'checkpoint_state.json'
 LOG_FILE = 'auto_copy.log'
 
-DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1524510158619676742/PMsdNwcdvql6RmIrXzheGdD5uFauJY5xrJ7c3b8LMKqaDmmD1yNJqkKj7zFbKW9EYFu5'
+DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525052640965300286/yElvPU6PdXP4YyDN4O_MbILinRwhIG2qRPUovZ0GT8SJ4naUbypextr-IkcR-r_qgtFr'
 HEARTBEAT_INTERVAL_SEC = 3600  # 1 jam
 
 POLL_INTERVAL_SEC = 10
@@ -254,11 +272,32 @@ def validate_setup(client):
 
     if target_sheet:
         available_target = [ws.title for ws in target_sheet.worksheets()]
-        for tab in [TARGET_TAB_NAME] + DUPLICATE_CHECK_EXTRA_TABS:
+
+        # TARGET_TAB_NAME wajib ada -- ini tab tujuan nulis data, kalau
+        # gak ada script emang gak bisa jalan sama sekali.
+        if TARGET_TAB_NAME not in available_target:
+            problems.append(
+                f'Tab "{TARGET_TAB_NAME}" gak ketemu di target sheet. '
+                f'Tab yang ada di sana: {available_target}'
+            )
+
+        # (fix) DUPLICATE_CHECK_EXTRA_TABS (tab shift LAWAN, buat cross-
+        # check dedup doang) SENGAJA gak dianggap fatal kalau belum ada.
+        # Sebelumnya ini di-treat sama kayak TARGET_TAB_NAME (wajib ada),
+        # padahal tab shift lawan wajar belum dibuat -- misal pas shift
+        # PAGI mulai duluan, tab "<tanggal> malam" emang belum ada sama
+        # sekali karena shift malam belum jalan. Akibatnya validate_setup
+        # nolak start walau TARGET_TAB_NAME-nya sendiri udah bener ada.
+        # get_existing_ids_from_tabs() di bawah udah bisa handle tab yang
+        # gak ketemu (skip + warning), jadi di sini cukup warning juga,
+        # bukan fatal.
+        for tab in DUPLICATE_CHECK_EXTRA_TABS:
             if tab not in available_target:
-                problems.append(
-                    f'Tab "{tab}" gak ketemu di target sheet. '
-                    f'Tab yang ada di sana: {available_target}'
+                log(
+                    f'⚠️ Tab dedup-check "{tab}" belum ada di target sheet '
+                    f'(wajar kalau shift lawan belum mulai) -- akan di-skip '
+                    f'dari cross-check duplikat, TIDAK menghentikan proses.',
+                    'warning'
                 )
 
     return problems
@@ -367,6 +406,20 @@ def auto_copy_tele(state, client):
 def run_auto():
     log('=' * 50)
     log('Sheet Worker Tele - Created by Dits')
+    log('=' * 50)
+
+    # (fix baru) Log persis config yang lagi aktif + dari file mana
+    # script ini kebaca, begitu start. Ini buat nyegah kasus kayak
+    # kemarin: kelihatan udah edit SHIFT='pagi', tapi run yang beneran
+    # jalan ternyata masih baca versi lama (beda file / belum ke-save /
+    # .bat manggil auto.py di folder lain). Dengan baris ini, tiap kali
+    # run keliatan jelas di log/console SHIFT & TARGET_TAB_NAME apa yang
+    # BENERAN dipakai -- tinggal dicocokin sama yang lo maksud.
+    log(f'SHIFT_DATE       : "{SHIFT_DATE}"')
+    log(f'SHIFT            : "{SHIFT}"')
+    log(f'SINGLE_SHIFT_DAY : {SINGLE_SHIFT_DAY}')
+    log(f'TARGET_TAB_NAME  : "{TARGET_TAB_NAME}"')
+    log(f'DUPLICATE_CHECK_EXTRA_TABS: {DUPLICATE_CHECK_EXTRA_TABS}')
     log('=' * 50)
 
     state = load_state()
